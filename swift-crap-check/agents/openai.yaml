@@ -1,0 +1,8 @@
+interface:
+  display_name: "Swift CRAP Check"
+  short_description: "Ranks Swift functions by change risk (complexity vs coverage) and drives them under threshold."
+  brand_color: "#F05138"
+  default_prompt: "Use $swift-crap-check to find the riskiest functions in this target and drive them under a CRAP of 6."
+
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,5 @@
+{
+  "name": "swift-crap-check",
+  "version": "1.0.0",
+  "description": "Ranks Swift functions by the CRAP metric - cyclomatic complexity against test coverage - and drives the risky ones under threshold"
+}
