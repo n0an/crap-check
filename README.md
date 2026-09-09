@@ -90,6 +90,8 @@ brew install swiftlint          # optional Swift bonus, sees closures separately
 
 Coverage is whatever the repo already produces: lcov, Cobertura, or `llvm-cov export` (not `--summary-only`).
 
+For Swift, run the scoring step on a machine that has `swift` on `PATH`. llvm-cov reports mangled symbols and demangling shells out to `swift demangle`; without it the scores are still correct but names print as `$s5AIKit12TextEnhancerV7enhance...` instead of `AIKit.TextEnhancer.enhance(...)`.
+
 
 ## Using CRAP Check
 

@@ -71,6 +71,10 @@ Pick the exporter that matches the stack. Never mix them in one run.
 npx nyc report --reporter=lcovonly --temp-dir coverage/.tmp > .crap/coverage.info
 # or: coverage xml is Cobertura; lcov is:
 python3 -m coverage lcov -o .crap/coverage.info
+# or, for node's built-in test runner - note it is the lcov *reporter*,
+# there is no --test-coverage-lcov flag:
+node --experimental-test-coverage \
+     --test-reporter=lcov --test-reporter-destination=.crap/coverage.info --test
 ```
 
 Done when `.crap/coverage.info` contains `DA:<line>,<hits>` records.
@@ -88,7 +92,9 @@ Done when the XML has `<line number="…" hits="…"/>` nodes.
 ```bash
 # SwiftPM
 swift test --enable-code-coverage
-BIN=$(find .build/debug -name '*.xctest' -print -quit)
+# -L is required: .build/debug is a symlink to .build/<triple>/debug,
+# and find without -L will not descend into it and returns nothing.
+BIN=$(find -L .build/debug -name '*.xctest' -print -quit)
 [ -d "$BIN/Contents/MacOS" ] && BIN="$BIN/Contents/MacOS/$(basename "$BIN" .xctest)"
 xcrun llvm-cov export -instr-profile .build/debug/codecov/default.profdata "$BIN" > .crap/cov.json
 ```
