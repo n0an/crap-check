@@ -67,7 +67,7 @@ Pick the exporter that matches the stack. Never mix them in one run.
 **lcov** (JS/TS via nyc/jest/vitest, Python via `coverage.py`, C/C++ via gcov, Go via `go tool cover` plus a converter, or `llvm-cov export --format=lcov`):
 
 ```bash
-# examples — use whatever already produces lcov in this repo
+# examples - use whatever already produces lcov in this repo
 npx nyc report --reporter=lcovonly --temp-dir coverage/.tmp > .crap/coverage.info
 # or: coverage xml is Cobertura; lcov is:
 python3 -m coverage lcov -o .crap/coverage.info
