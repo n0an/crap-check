@@ -245,6 +245,110 @@ def test_basename_fallback() -> None:
         assert any("filename" in w for w in fn["warnings"])
 
 
+def test_xccov_hits_drops_non_executable() -> None:
+    """xccov marks every line, executable or not. Only executable ones are hits."""
+    payload = {
+        "/tmp/Sample.swift": [
+            {"isExecutable": False, "line": 1},
+            {"isExecutable": True, "line": 2, "executionCount": 7},
+            {"isExecutable": True, "line": 3, "executionCount": 0},
+            {"isExecutable": True, "line": 4},
+            {"isExecutable": False, "line": 5},
+        ]
+    }
+    hits = crap.xccov_hits(payload)
+    key = crap.normalize("/tmp/Sample.swift")
+    assert list(hits) == [key], hits
+    # Line 4 is executable with no executionCount key -> 0 hits, not dropped.
+    assert hits[key] == {2: 7, 3: 0, 4: 0}, hits[key]
+
+
+def test_xccov_hits_ignores_malformed() -> None:
+    assert crap.xccov_hits(["not", "a", "dict"]) == {}
+    assert crap.xccov_hits({"/tmp/a.swift": "not a list"}) == {}
+    # A file whose every line is non-executable contributes nothing.
+    assert crap.xccov_hits({"/tmp/a.swift": [{"isExecutable": False, "line": 1}]}) == {}
+
+
+def test_xccov_argv_archive_flag_depends_on_bundle_type() -> None:
+    """An .xcresult needs --archive; an .xccovarchive rejects it."""
+    result = crap.xccov_argv("Build.xcresult", ["--file-list"])
+    assert result == ["xcrun", "xccov", "view", "--archive", "--file-list", "Build.xcresult"]
+    archive = crap.xccov_argv("Build.xccovarchive", ["--file-list"])
+    assert archive == ["xcrun", "xccov", "view", "--file-list", "Build.xccovarchive"]
+    # A trailing slash must not defeat the suffix check.
+    assert "--archive" not in crap.xccov_argv("Build.xccovarchive/", ["--file-list"])
+
+
+def test_xccov_scores_like_equivalent_lcov() -> None:
+    """xccov line hits and the same hits as lcov must produce identical CRAP."""
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "Sample.swift"
+        src.write_text("// swift\n")
+        lizard = write(
+            Path(tmp) / "lizard.csv",
+            f'20,10,100,2,15,"Sample.swift:10",{src},"classify","classify",10,17\n',
+        )
+        # 8 executable lines, 2 hit => 25% => CRAP 52.1875 for complexity 10.
+        hits = {n: (1 if n in (10, 11) else 0) for n in range(10, 18)}
+        lcov = write(
+            Path(tmp) / "coverage.info",
+            "TN:\nSF:%s\n%s\nend_of_record\n"
+            % (src, "\n".join(f"DA:{n},{h}" for n, h in hits.items())),
+        )
+        from_lcov = run_script("--lizard", str(lizard), "--lcov", str(lcov), "--json", "--all")
+        assert from_lcov.returncode == 1, from_lcov.stderr
+        expected = json.loads(from_lcov.stdout)["functions"][0]
+
+        payload = {
+            str(src): [
+                {"isExecutable": True, "line": n, "executionCount": h}
+                for n, h in hits.items()
+            ]
+        }
+        units = crap.parse_lizard(str(lizard))
+        rows = crap.build_rows_lines(units, crap.xccov_hits(payload))
+        assert len(rows) == 1, rows
+        assert abs(rows[0].crap - expected["crap"]) < 0.01, (rows[0].crap, expected["crap"])
+        assert abs(rows[0].crap - crap_of(10, 0.25)) < 1e-9, rows[0].crap
+
+
+def test_xccov_missing_bundle_exits() -> None:
+    result = run_script("--lizard", "/nope.csv", "--xcresult", "/nope.xcresult")
+    assert result.returncode != 0
+    assert "no such file" in (result.stdout + result.stderr).lower()
+
+
+def test_zero_width_lint_unit_warns_about_lizard() -> None:
+    """A --lint unit against line coverage says what to do instead."""
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "Sample.swift"
+        src.write_text("// swift\n")
+        lint = write(
+            Path(tmp) / "lint.json",
+            json.dumps(
+                [
+                    {
+                        "rule_id": "cyclomatic_complexity",
+                        "file": str(src),
+                        "line": 42,
+                        "reason": "Function should have complexity 10 or less; "
+                        "currently complexity is 19",
+                    }
+                ]
+            ),
+        )
+        # Executable lines exist, but none on line 42 itself.
+        lcov = write(
+            Path(tmp) / "coverage.info",
+            f"TN:\nSF:{src}\nDA:50,1\nDA:51,0\nend_of_record\n",
+        )
+        result = run_script("--lint", str(lint), "--lcov", str(lcov), "--json", "--all")
+        fn = json.loads(result.stdout)["functions"][0]
+        assert fn["coverage"] == 0.0
+        assert any("--lizard" in w for w in fn["warnings"]), fn["warnings"]
+
+
 def main() -> int:
     tests = [
         test_lizard_lcov_hand_calc,
@@ -254,6 +358,12 @@ def main() -> int:
         test_llvm_cov_join_by_innermost_span,
         test_unmatched_file_scores_zero,
         test_basename_fallback,
+        test_xccov_hits_drops_non_executable,
+        test_xccov_hits_ignores_malformed,
+        test_xccov_argv_archive_flag_depends_on_bundle_type,
+        test_xccov_scores_like_equivalent_lcov,
+        test_xccov_missing_bundle_exits,
+        test_zero_width_lint_unit_warns_about_lizard,
     ]
     failed = 0
     for test in tests:

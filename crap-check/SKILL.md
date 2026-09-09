@@ -103,6 +103,34 @@ Never pass `--summary-only`. It strips per-function data and every function woul
 
 Done when `.crap/cov.json` contains a non-empty `functions` array.
 
+**Xcode `.xcresult`** (an iOS/macOS **app** project - the case llvm-cov cannot reach):
+
+```bash
+xcodebuild test -workspace App.xcworkspace -scheme App \
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
+  -enableCodeCoverage YES -resultBundlePath .crap/cov.xcresult
+```
+
+Then pass the bundle directly - no conversion step:
+
+```bash
+python3 scripts/crap.py --lizard .crap/lizard.csv --xcresult .crap/cov.xcresult \
+  --xccov-include /Sources/ --threshold 6
+```
+
+Reach for this whenever `swift test` is not an option, which is most real apps: an
+app target cannot be built on the host at all, and a package whose dependencies
+are iOS-only cannot either. Those projects test through the simulator, and an
+`.xcresult` is the only coverage artifact they produce.
+
+**`--xccov-include` is close to required on a real app.** `xccov` has no
+whole-bundle line dump - each file needs its own invocation, ~0.7s - so an
+800-file bundle is minutes even across the default 8 threads. Filter to the
+sources you care about (`--xccov-include /Sources/`), and raise
+`--xccov-jobs` if the machine can take it. An `.xccovarchive` works too.
+
+Done when the run prints scored rows rather than `no files ... matched`.
+
 ### 3. Score
 
 ```bash
@@ -110,6 +138,7 @@ python3 scripts/crap.py --lizard .crap/lizard.csv --lcov .crap/coverage.info --t
 python3 scripts/crap.py --lizard .crap/lizard.csv --cobertura coverage.xml --threshold 6
 python3 scripts/crap.py --lizard .crap/lizard.csv --coverage .crap/cov.json --threshold 6
 python3 scripts/crap.py --lint   .crap/lint.json  --coverage .crap/cov.json --threshold 6
+python3 scripts/crap.py --lizard .crap/lizard.csv --xcresult .crap/cov.xcresult --threshold 6
 ```
 
 Exit code 1 means at least one function is over. `--json` is for a loop. `--all` lists passing functions too.
@@ -137,7 +166,9 @@ If those three hold, the score is trustworthy and the diff does not need line-by
 ## Limits
 
 - lizard folds closure complexity into the parent. SwiftLint does not. A fat closure inside a thin function hides in lizard's average.
-- lcov/Cobertura coverage is line-based (executable lines inside the function span). llvm-cov coverage is region-based and reads closer to branch coverage, so those numbers run lower than the percentage an IDE shows.
+- lcov/Cobertura/xccov coverage is line-based (executable lines inside the function span). llvm-cov coverage is region-based and reads closer to branch coverage, so those numbers run lower than the percentage an IDE shows.
+- **Pair `--lint` with `--coverage`, and the line-based sources with `--lizard`.** SwiftLint reports a single line, not a span, so against `--lcov` / `--cobertura` / `--xcresult` it probes only the declaration line - normally not executable - and every function scores 0%. lizard reports a real start and end line. The script says so in a warning when it happens, but the pairing is the fix.
+- `--xcresult` shells out to `xccov`, so it is macOS-with-Xcode only. Elsewhere, export lcov or Cobertura.
 - A file in the complexity report but not in the coverage export scores 0% and sorts to the top. Treat that as a build problem first.
 - Swift function names print mangled unless `swift demangle` is on `PATH`. Other languages print lizard's name as-is.
 

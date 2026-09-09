@@ -4,7 +4,7 @@
     <img src="https://img.shields.io/badge/metric-CRAP-e8590c.svg" alt="CRAP metric" />
     <img src="https://img.shields.io/badge/threshold-6-2d7ff9.svg" alt="Default threshold 6" />
     <img src="https://img.shields.io/badge/complexity-lizard-5cb85c.svg" alt="lizard complexity" />
-    <img src="https://img.shields.io/badge/coverage-lcov%20%7C%20Cobertura%20%7C%20llvm--cov-F05138.svg" alt="lcov, Cobertura, llvm-cov" />
+    <img src="https://img.shields.io/badge/coverage-lcov%20%7C%20Cobertura%20%7C%20llvm--cov%20%7C%20xcresult-F05138.svg" alt="lcov, Cobertura, llvm-cov, xcresult" />
     <img src="https://img.shields.io/badge/version-2.0.0-blueviolet.svg" alt="Version 2.0.0" />
     <img src="https://img.shields.io/badge/license-MIT-lightgrey.svg" alt="MIT License" />
     <a href="https://agentskills.io/home">
@@ -38,7 +38,7 @@ The cube is the whole idea. A function of complexity 12 scores **156** with no t
 
 - **The scoring loop** - report complexity for every function, export coverage, join them, and rank by change risk with a hard exit code so an agent or a CI job can loop on it
 - **lizard as the default complexity source** - pure Python, 27 languages, real line spans, no compiler. SwiftLint remains an optional Swift-only bonus because it scores closures as their own units
-- **Three coverage inputs** - lcov `.info` (JS/TS, Python, gcov, Go via a converter), Cobertura XML (Java/Kotlin/.NET), llvm-cov JSON (Swift/ObjC/C/C++/Rust on LLVM). Line-based coverage joins against lizard's span; llvm-cov still joins by innermost function region
+- **Four coverage inputs** - lcov `.info` (JS/TS, Python, gcov, Go via a converter), Cobertura XML (Java/Kotlin/.NET), llvm-cov JSON (Swift/ObjC/C/C++/Rust on LLVM), and an Xcode `.xcresult` read through `xccov` (iOS/macOS app projects, where `swift test` and therefore llvm-cov are not available). Line-based coverage joins against lizard's span; llvm-cov still joins by innermost function region
 - **A line-based join, not a name-based one** - nested functions attach to the right owner, and generics do not break the match
 - **How to pick the fix** - coverage is cubed and complexity is only squared, so tests collapse the score faster than extraction. Still over threshold at 100% coverage means complexity is the entire score, and only then is it time to split
 - **The traps that produce confident nonsense** - `llvm-cov --summary-only` silently reads as 0% coverage across the board (the script hard-rejects it), a regex over `if`/`for`/`while` inflates CRAP because complexity is squared (do not do this), and a file missing from the coverage export sorts to the top as a build problem rather than a testing gap
@@ -88,7 +88,7 @@ pip install lizard              # default, 27 languages, no toolchain
 brew install swiftlint          # optional Swift bonus, sees closures separately
 ```
 
-Coverage is whatever the repo already produces: lcov, Cobertura, or `llvm-cov export` (not `--summary-only`).
+Coverage is whatever the repo already produces: lcov, Cobertura, `llvm-cov export` (not `--summary-only`), or an Xcode `.xcresult` via `--xcresult` (macOS only; use `--xccov-include` to scope it, since `xccov` costs ~0.7s per file).
 
 For Swift, run the scoring step on a machine that has `swift` on `PATH`. llvm-cov reports mangled symbols and demangling shells out to `swift demangle`; without it the scores are still correct but names print as `$s5AIKit12TextEnhancerV7enhance...` instead of `AIKit.TextEnhancer.enhance(...)`.
 
@@ -144,7 +144,7 @@ crap-check/                          the portable Agent Skills folder
 ├── SKILL.md                         the workflow: sources, join, scoring, the repair loop
 ├── scripts/crap.py                  the scorer - joins complexity to coverage, ranks by CRAP
 └── agents/openai.yaml               Codex interface metadata
-tests/test_crap.py                   fixture tests (lcov, Cobertura, llvm-cov, SwiftLint)
+tests/test_crap.py                   fixture tests (lcov, Cobertura, llvm-cov, xccov, SwiftLint)
 .claude-plugin/plugin.json           the plugin manifest
 gemini-extension.json                the Gemini extension manifest
 ```
