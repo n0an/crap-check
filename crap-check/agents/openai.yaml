@@ -1,0 +1,8 @@
+interface:
+  display_name: "CRAP Check"
+  short_description: "Ranks functions by change risk (complexity vs coverage) across languages and drives them under threshold."
+  brand_color: "#e8590c"
+  default_prompt: "Use $crap-check to find the riskiest functions in this target and drive them under a CRAP of 6."
+
+policy:
+  allow_implicit_invocation: true

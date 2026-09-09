@@ -1,14 +1,14 @@
 {
-  "name": "swift-crap-check",
-  "description": "Ranks Swift functions by the CRAP metric - cyclomatic complexity against test coverage - and drives the risky ones under threshold",
-  "version": "1.0.0",
+  "name": "crap-check",
+  "description": "Ranks functions by the CRAP metric - cyclomatic complexity against test coverage - across languages, and drives the risky ones under threshold",
+  "version": "2.0.0",
   "author": {
     "name": "Anton Novoselov",
     "url": "https://github.com/n0an"
   },
   "license": "MIT",
-  "repository": "https://github.com/n0an/swift-crap-check",
+  "repository": "https://github.com/n0an/crap-check",
   "skills": [
-    "./swift-crap-check/"
+    "./crap-check/"
   ]
 }

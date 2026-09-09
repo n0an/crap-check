@@ -1,26 +1,26 @@
 #!/usr/bin/env python3
-"""Compute the CRAP metric per function for a Swift target.
+"""Compute the CRAP metric per function.
 
 CRAP (Change Risk Anti-Patterns, Agitar Software ~2007):
 
     crap(m) = complexity(m)^2 * (1 - coverage(m))^3 + complexity(m)
 
-Complexity comes from either SwiftLint's `cyclomatic_complexity` rule (JSON
-reporter) or `lizard --csv`, which needs no Swift toolchain. Coverage comes
-from `xcrun llvm-cov export` (full export, not --summary-only).
+Complexity comes from `lizard --csv` (27 languages, no toolchain) or, for
+Swift, SwiftLint's cyclomatic_complexity JSON reporter. Coverage comes from
+lcov `.info`, Cobertura XML, or `llvm-cov export` JSON (Apple/LLVM).
 
-The two are joined by source location: each complexity record carries a file
-and a line, every llvm-cov function carries its filename and the line span of
-its coverage regions. A record belongs to the function with the tightest span
-containing that line, which keeps nested functions and closures attached to
-the right owner.
+Join is by source location. lizard and llvm-cov both give a line span;
+SwiftLint gives a single line. A record belongs to the tightest coverage
+span that contains that line, or, for line-based coverage, to the executable
+lines inside the complexity span.
 
 Usage:
-    crap.py --lint   lint.json   --coverage cov.json [--threshold 6] [--json]
-    crap.py --lizard lizard.csv  --coverage cov.json [--threshold 6] [--json]
+    crap.py --lizard lizard.csv --lcov coverage.info [--threshold 6]
+    crap.py --lizard lizard.csv --cobertura coverage.xml
+    crap.py --lizard lizard.csv --coverage cov.json
+    crap.py --lint   lint.json  --coverage cov.json
 
-Exit code is 1 when at least one function scores above the threshold, so the
-script can drive an agent loop or a CI gate.
+Exit code is 1 when at least one function scores above the threshold.
 """
 
 from __future__ import annotations
@@ -33,13 +33,10 @@ import re
 import shutil
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 
-# "Function should have complexity 6 or less; currently complexity is 12"
 COMPLEXITY_RE = re.compile(r"currently complexity is (\d+)")
-
-# llvm-cov region kinds. 0 = code region; the others (expansion, skipped,
-# gap, branch) must not count toward coverage.
 CODE_REGION_KIND = 0
 
 
@@ -67,9 +64,18 @@ class Function:
 
 
 @dataclass
-class Row:
-    """A complexity violation joined against coverage."""
+class Unit:
+    """A function to be scored, from whichever complexity source was used."""
 
+    path: str
+    start_line: int
+    end_line: int
+    complexity: int
+    label: str
+
+
+@dataclass
+class Row:
     path: str
     line: int
     complexity: int
@@ -86,11 +92,7 @@ class Row:
 
 
 def normalize(path: str) -> str:
-    """Resolve a path so llvm-cov and SwiftLint agree on it.
-
-    Xcode reports build paths through /private/var while SwiftLint reports the
-    workspace path, so compare on the realpath.
-    """
+    """Resolve a path so coverage and complexity tools agree on it."""
     return os.path.realpath(os.path.expanduser(path))
 
 
@@ -102,17 +104,6 @@ def load_json(path: str) -> object:
         sys.exit(f"crap: no such file: {path}")
     except json.JSONDecodeError as exc:
         sys.exit(f"crap: {path} is not valid JSON: {exc}")
-
-
-@dataclass
-class Unit:
-    """A function to be scored, from whichever complexity source was used."""
-
-    path: str
-    start_line: int
-    end_line: int
-    complexity: int
-    label: str
 
 
 def parse_lint(payload: object) -> list[Unit]:
@@ -167,7 +158,6 @@ def parse_lizard(path: str) -> list[Unit]:
                     start_line = int(row[9])
                     end_line = int(row[10])
                 except ValueError:
-                    # The header row, if lizard ever grows one.
                     continue
                 out.append(
                     Unit(
@@ -189,12 +179,12 @@ def parse_lizard(path: str) -> list[Unit]:
     return out
 
 
-def parse_coverage(payload: object) -> dict[str, list[Function]]:
+def parse_llvm_cov(payload: object) -> dict[str, list[Function]]:
     """Extract per-function coverage from an llvm-cov export, keyed by path."""
     if not isinstance(payload, dict) or "data" not in payload:
         sys.exit(
             "crap: expected an llvm-cov export object; run "
-            "`xcrun llvm-cov export` WITHOUT --summary-only"
+            "`llvm-cov export` / `xcrun llvm-cov export` WITHOUT --summary-only"
         )
 
     by_path: dict[str, list[Function]] = {}
@@ -207,7 +197,6 @@ def parse_coverage(payload: object) -> dict[str, list[Function]]:
 
             code_regions = [r for r in regions if len(r) > 7 and r[7] == CODE_REGION_KIND]
             if not code_regions:
-                # Older llvm-cov emits shorter tuples with no kind field.
                 code_regions = [r for r in regions if len(r) >= 5]
             if not code_regions:
                 continue
@@ -225,18 +214,84 @@ def parse_coverage(payload: object) -> dict[str, list[Function]]:
             by_path.setdefault(path, []).append(fn)
 
     if not by_path:
-        # A --summary-only export still has a `data` array, so the shape check
-        # above passes and every function would silently score as 0% covered.
         sys.exit(
             "crap: the coverage export contains no per-function data. Re-run "
-            "`xcrun llvm-cov export` WITHOUT --summary-only."
+            "`llvm-cov export` WITHOUT --summary-only."
         )
     return by_path
 
 
-def find_owner(
-    functions: list[Function], line: int
-) -> Function | None:
+def parse_lcov(path: str) -> dict[str, dict[int, int]]:
+    """Extract DA:<line>,<hits> records from an lcov .info file."""
+    by_path: dict[str, dict[int, int]] = {}
+    current: str | None = None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            for raw in handle:
+                line = raw.strip()
+                if line.startswith("SF:"):
+                    current = normalize(line[3:])
+                    by_path.setdefault(current, {})
+                elif line.startswith("DA:") and current:
+                    parts = line[3:].split(",")
+                    if len(parts) < 2:
+                        continue
+                    try:
+                        lineno = int(parts[0])
+                        hits = int(float(parts[1]))
+                    except ValueError:
+                        continue
+                    by_path[current][lineno] = hits
+                elif line == "end_of_record":
+                    current = None
+    except FileNotFoundError:
+        sys.exit(f"crap: no such file: {path}")
+
+    by_path = {p: hits for p, hits in by_path.items() if hits}
+    if not by_path:
+        sys.exit(
+            f"crap: no DA line records in {path}. Export lcov with "
+            "line data (nyc/jest, coverage.py --format=lcov, "
+            "llvm-cov export --format=lcov, gcov)."
+        )
+    return by_path
+
+
+def parse_cobertura(path: str) -> dict[str, dict[int, int]]:
+    """Extract line hits from Cobertura XML (Java/Kotlin/.NET and friends)."""
+    try:
+        tree = ET.parse(path)
+    except FileNotFoundError:
+        sys.exit(f"crap: no such file: {path}")
+    except ET.ParseError as exc:
+        sys.exit(f"crap: {path} is not valid Cobertura XML: {exc}")
+
+    by_path: dict[str, dict[int, int]] = {}
+    for cls in tree.iter():
+        if not cls.tag.endswith("class"):
+            continue
+        filename = cls.get("filename") or cls.get("name")
+        if not filename:
+            continue
+        hits: dict[int, int] = by_path.setdefault(normalize(filename), {})
+        for node in cls.iter():
+            if not node.tag.endswith("line"):
+                continue
+            number = node.get("number")
+            if not number:
+                continue
+            try:
+                hits[int(number)] = int(float(node.get("hits") or 0))
+            except ValueError:
+                continue
+
+    by_path = {p: hits for p, hits in by_path.items() if hits}
+    if not by_path:
+        sys.exit(f"crap: no line records in {path}. Expected Cobertura XML.")
+    return by_path
+
+
+def find_owner(functions: list[Function], line: int) -> Function | None:
     """Return the innermost function whose region span contains `line`."""
     containing = [f for f in functions if f.start_line <= line <= f.end_line]
     if not containing:
@@ -244,25 +299,26 @@ def find_owner(
     return min(containing, key=lambda f: (f.span, f.start_line))
 
 
-def build_rows(
-    units: list[Unit],
-    coverage: dict[str, list[Function]],
-) -> list[Row]:
-    # Fall back to basename when the absolute paths disagree, which happens
-    # with symlinked checkouts and DerivedData copies.
-    by_basename: dict[str, list[Function]] = {}
-    for path, functions in coverage.items():
-        by_basename.setdefault(os.path.basename(path), []).extend(functions)
+def resolve_path(
+    unit_path: str, available: dict[str, object]
+) -> tuple[str | None, list[str]]:
+    """Match a complexity path to a coverage path; fall back to basename."""
+    if unit_path in available:
+        return unit_path, []
+    by_base: dict[str, list[str]] = {}
+    for path in available:
+        by_base.setdefault(os.path.basename(path), []).append(path)
+    matches = by_base.get(os.path.basename(unit_path), [])
+    if len(matches) == 1:
+        return matches[0], ["matched by filename, not full path"]
+    return None, []
 
+
+def build_rows_llvm(units: list[Unit], coverage: dict[str, list[Function]]) -> list[Row]:
     rows: list[Row] = []
     for unit in units:
-        warnings: list[str] = []
-        functions = coverage.get(unit.path)
-        if functions is None:
-            functions = by_basename.get(os.path.basename(unit.path))
-            if functions:
-                warnings.append("matched by filename, not full path")
-
+        path, warnings = resolve_path(unit.path, coverage)
+        functions = coverage.get(path) if path else None
         owner = find_owner(functions, unit.start_line) if functions else None
         if owner is None:
             rows.append(
@@ -277,7 +333,6 @@ def build_rows(
                 )
             )
             continue
-
         rows.append(
             Row(
                 path=unit.path,
@@ -290,7 +345,59 @@ def build_rows(
                 warnings=warnings,
             )
         )
+    rows.sort(key=lambda r: (-r.crap, r.path, r.line))
+    return rows
 
+
+def build_rows_lines(units: list[Unit], line_hits: dict[str, dict[int, int]]) -> list[Row]:
+    """Join complexity spans to lcov/Cobertura line hits."""
+    rows: list[Row] = []
+    for unit in units:
+        path, warnings = resolve_path(unit.path, line_hits)
+        hits = line_hits.get(path) if path else None
+        if not hits:
+            rows.append(
+                Row(
+                    path=unit.path,
+                    line=unit.start_line,
+                    complexity=unit.complexity,
+                    coverage=0.0,
+                    name=unit.label or "<no coverage data>",
+                    matched=False,
+                    warnings=["not in the coverage report; scored as 0% covered"],
+                )
+            )
+            continue
+        span = {
+            lineno: count
+            for lineno, count in hits.items()
+            if unit.start_line <= lineno <= unit.end_line
+        }
+        if not span:
+            rows.append(
+                Row(
+                    path=unit.path,
+                    line=unit.start_line,
+                    complexity=unit.complexity,
+                    coverage=0.0,
+                    name=unit.label or "<no coverage data>",
+                    matched=False,
+                    warnings=["no executable lines in this span; scored as 0% covered"],
+                )
+            )
+            continue
+        covered = sum(1 for count in span.values() if count > 0)
+        rows.append(
+            Row(
+                path=unit.path,
+                line=unit.start_line,
+                complexity=unit.complexity,
+                coverage=covered / len(span),
+                name=unit.label or "<line coverage>",
+                matched=True,
+                warnings=warnings,
+            )
+        )
     rows.sort(key=lambda r: (-r.crap, r.path, r.line))
     return rows
 
@@ -326,7 +433,7 @@ def shorten(name: str, width: int = 58) -> str:
 
 def render_table(rows: list[Row], threshold: float, pretty: dict[str, str]) -> str:
     if not rows:
-        return "No functions above the SwiftLint complexity threshold. Nothing to score.\n"
+        return "No functions to score.\n"
 
     lines = [
         f"{'CRAP':>7}  {'CX':>3}  {'COV':>6}  LOCATION",
@@ -358,17 +465,22 @@ def render_table(rows: list[Row], threshold: float, pretty: dict[str, str]) -> s
     return "\n".join(lines) + "\n"
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Compute the CRAP metric per function from SwiftLint + llvm-cov."
+        description="Compute the CRAP metric per function from complexity + coverage."
     )
     source = parser.add_mutually_exclusive_group(required=True)
-    source.add_argument("--lint", help="swiftlint --reporter json output")
     source.add_argument(
-        "--lizard", help="lizard --csv output (no swiftlint or Swift toolchain needed)"
+        "--lizard",
+        help="lizard --csv output (default complexity source; 27 languages)",
     )
-    parser.add_argument(
-        "--coverage", required=True, help="xcrun llvm-cov export output (not --summary-only)"
+    source.add_argument("--lint", help="swiftlint --reporter json output (Swift only)")
+    coverage = parser.add_mutually_exclusive_group(required=True)
+    coverage.add_argument("--lcov", help="lcov .info file (line hits)")
+    coverage.add_argument("--cobertura", help="Cobertura XML (line hits)")
+    coverage.add_argument(
+        "--coverage",
+        help="llvm-cov export JSON (not --summary-only); Apple/LLVM stack",
     )
     parser.add_argument(
         "--threshold", type=float, default=6.0, help="fail above this CRAP score (default 6)"
@@ -377,14 +489,19 @@ def main() -> int:
     parser.add_argument(
         "--all", action="store_true", help="list every scored function, not just those over threshold"
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if args.lizard:
         units = parse_lizard(args.lizard)
     else:
         units = parse_lint(load_json(args.lint))
-    coverage = parse_coverage(load_json(args.coverage))
-    rows = build_rows(units, coverage)
+
+    if args.lcov:
+        rows = build_rows_lines(units, parse_lcov(args.lcov))
+    elif args.cobertura:
+        rows = build_rows_lines(units, parse_cobertura(args.cobertura))
+    else:
+        rows = build_rows_llvm(units, parse_llvm_cov(load_json(args.coverage)))
 
     unmatched = sum(1 for r in rows if not r.matched)
     over = [r for r in rows if r.crap > args.threshold]
